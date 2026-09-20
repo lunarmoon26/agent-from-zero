@@ -102,9 +102,13 @@ def _execute_tool_call(tool_call) -> dict:
     }
 
 
-def ask(user_message: str, system: str = AGENT_SYSTEM_PROMPT, max_steps: int = DEFAULT_MAX_STEPS) -> ChatResult:
+def _run_loop_on_messages(messages: list[dict], max_steps: int) -> ChatResult:
     """
-    真正的 Agent Loop：持续循环，直到模型这一轮不再要求调用任何工具为止。
+    真正的 Agent Loop 核心：在传入的 `messages` 列表上**原地**运行，持续
+    循环直到模型这一轮不再要求调用任何工具为止——不关心这份 `messages`
+    是谁传进来的、跑完之后会不会被留着用。`ask()`（Commit 2.2）和
+    `memory.Conversation.send()`（Commit 6.2 新增）共享这同一份实现：
+    两者的区别只在于 `messages` 的生命周期，不在于循环怎么跑。
 
     每一轮都带上 `TOOLS`——循环可能要跑任意多轮，只要还没到"模型不再需要
     工具"的那一轮，模型就必须始终能看到自己还有哪些工具可以用，否则它在
@@ -113,12 +117,42 @@ def ask(user_message: str, system: str = AGENT_SYSTEM_PROMPT, max_steps: int = D
     模型一次响应里也可能同时请求多个工具调用（不只是一个），用 for 循环
     逐个执行、逐条把结果加回去，不假设 `tool_calls` 只有一个元素。
 
-    `max_steps` 是这一版新加的硬上限——Commit 2.2 的 `while True` 没有任何
-    退出条件保护，如果模型陷入"总觉得还需要再查一次"的状态，会真的死循环。
-    跑满 `max_steps` 轮还没拿到最终答案，就抛 `MaxStepsExceeded`，不返回一个
-    看起来像正常回答、实际是"未完成"的字符串——字符串结果和真正的最终答案
-    长得一样，调用方很容易忘记检查"这是不是真的答案"；异常会强制调用方
-    要么处理、要么让它继续往上冒，不会被悄悄当成正常结果使用。
+    `max_steps` 是硬上限——`while True` 没有任何退出条件保护，如果模型
+    陷入"总觉得还需要再查一次"的状态，会真的死循环。跑满 `max_steps` 轮
+    还没拿到最终答案，就抛 `MaxStepsExceeded`，不返回一个看起来像正常
+    回答、实际是"未完成"的字符串——字符串结果和真正的最终答案长得一样，
+    调用方很容易忘记检查"这是不是真的答案"；异常会强制调用方要么处理、
+    要么让它继续往上冒，不会被悄悄当成正常结果使用。
+
+    最终答案在返回前，会多写回一条 `{"role": "assistant", "content": ...}`
+    到 `messages` 里——`ask()` 场景下这一步写不写都无所谓（反正 `messages`
+    用完就丢），但 `Conversation` 场景下，如果不写回去，下一轮 `.send()`
+    就看不到"上一轮 Agent 自己说了什么"，只能看到用户说了什么和工具返回
+    了什么，这对多轮对话是致命的缺口，所以顺带修在了两者共享的这个函数里。
+    """
+    results: list[ChatResult] = []
+    for _ in range(max_steps):
+        response, latency_ms = llm._complete(messages, tools=TOOLS)
+        results.append(llm._to_chat_result(response, latency_ms))
+
+        message = response.choices[0].message
+        if not message.tool_calls:
+            final_result = _sum_chat_results(results)
+            messages.append({"role": "assistant", "content": final_result.text})
+            return final_result
+
+        messages.append(_assistant_message(message))
+        for tool_call in message.tool_calls:
+            messages.append(_execute_tool_call(tool_call))
+
+    raise MaxStepsExceeded(max_steps)
+
+
+def ask(user_message: str, system: str = AGENT_SYSTEM_PROMPT, max_steps: int = DEFAULT_MAX_STEPS) -> ChatResult:
+    """
+    单次提问的入口：拼一份全新的 `[system, user]`，交给 `_run_loop_on_messages`
+    跑完整个 Agent Loop。这份 `messages` 是局部变量，函数返回后就被丢弃——
+    如果想让 Agent 记住这次问了什么、答了什么，见 `memory.Conversation`。
 
     `system` 默认是 `AGENT_SYSTEM_PROMPT`（Commit 6.1 新增）：在通用的
     `llm.DEFAULT_SYSTEM` 之后叠加一段业务背景（仓库位置、安全库存阈值、
@@ -129,18 +163,4 @@ def ask(user_message: str, system: str = AGENT_SYSTEM_PROMPT, max_steps: int = D
         {"role": "system", "content": system},
         {"role": "user", "content": user_message},
     ]
-
-    results: list[ChatResult] = []
-    for _ in range(max_steps):
-        response, latency_ms = llm._complete(messages, tools=TOOLS)
-        results.append(llm._to_chat_result(response, latency_ms))
-
-        message = response.choices[0].message
-        if not message.tool_calls:
-            return _sum_chat_results(results)
-
-        messages.append(_assistant_message(message))
-        for tool_call in message.tool_calls:
-            messages.append(_execute_tool_call(tool_call))
-
-    raise MaxStepsExceeded(max_steps)
+    return _run_loop_on_messages(messages, max_steps)
