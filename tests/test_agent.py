@@ -2,6 +2,8 @@ import copy
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.agent import agent, llm
 
 
@@ -216,3 +218,73 @@ class TestMissingProductPlumbing:
         # 不应该抛任何异常——None 是 get_inventory 的正常返回值之一（Commit 1.1
         # 就是这么设计的），不是需要特殊 catch 的错误。
         agent.ask("Z999 还有多少库存？")
+
+
+class TestMaxStepsGuard:
+    """
+    这一组的 Break It 实验故意不打真实 API——要验证的是"我们自己的循环控制
+    代码在跑满 max_steps 之后会不会正确停下来"，这是我们自己的逻辑，不是模型
+    的真实行为，用 mock 反复模拟"模型永远还要再调用一次工具"完全够用，而且
+    免费。真的花钱去让模型在生产环境里死循环 10+ 次，不会比这更有说服力。
+    """
+
+    def _always_wants_another_tool_call(self, **_kwargs) -> MagicMock:
+        # 每次都返回一个新的 tool_call，模拟"模型永远觉得还需要再查一次"
+        # 这种（真实世界里确实会发生的）状态。
+        return _response(
+            content=None,
+            tool_calls=[_tool_call("call_loop", "get_inventory", {"product_id": "A100"})],
+        )
+
+    def test_normal_task_is_not_affected_by_the_guard(self, monkeypatch):
+        # 正常两轮就结束的任务，加了 max_steps 之后不应该被误伤。
+        tool_call = _tool_call("call_1", "get_inventory", {"product_id": "A100"})
+        first_response = _response(content=None, tool_calls=[tool_call])
+        second_response = _response(content="A100 库存 20。", tool_calls=None)
+        fake_client = _client_with_responses(first_response, second_response)
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        result = agent.ask("A100 还有多少库存？", max_steps=10)
+
+        assert result.text == "A100 库存 20。"
+
+    def test_infinite_loop_is_stopped_at_max_steps(self, monkeypatch):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = self._always_wants_another_tool_call
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        with pytest.raises(agent.MaxStepsExceeded) as exc_info:
+            agent.ask("随便问点什么", max_steps=10)
+
+        assert exc_info.value.max_steps == 10
+        # 跑满 10 步就应该停手，不多不少——第 11 次调用不应该发生。
+        assert fake_client.chat.completions.create.call_count == 10
+
+    def test_max_steps_exceeded_message_is_readable(self, monkeypatch):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = self._always_wants_another_tool_call
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        with pytest.raises(agent.MaxStepsExceeded) as exc_info:
+            agent.ask("随便问点什么", max_steps=3)
+
+        assert "3" in str(exc_info.value)
+        assert "steps" in str(exc_info.value)
+
+    def test_max_steps_is_configurable(self, monkeypatch):
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = self._always_wants_another_tool_call
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        with pytest.raises(agent.MaxStepsExceeded):
+            agent.ask("随便问点什么", max_steps=2)
+
+        assert fake_client.chat.completions.create.call_count == 2
+
+    def test_max_steps_exceeded_is_a_loop_error_not_a_chat_error(self):
+        # LoopError 和 llm.py 的 ChatError 是两条不同的失败家族——循环控制流
+        # 失败和模型调用失败是不同性质的问题，不应该共用同一个基类，方便以后
+        # 调用方分别处理（比如：ChatError 值得 retry，LoopError 通常不值得）。
+        assert issubclass(agent.MaxStepsExceeded, agent.LoopError)
+        assert issubclass(agent.LoopError, Exception)
+        assert not issubclass(agent.LoopError, llm.ChatError)
