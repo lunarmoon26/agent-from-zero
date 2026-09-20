@@ -12,6 +12,28 @@ def get_inventory(product_id: str) -> dict | None:
     return products.get(product_id)
 
 
+def add_inventory(product_id: str, qty: int) -> dict | None:
+    """入库：库存数量增加 qty。这一版故意不做任何校验（qty 是不是正数、
+    product_id 存不存在都不检查，找不到直接返回 None）——参数校验是 Phase 3
+    的范围，这里先只管"写操作本身怎么接进 Tool Calling 的流程"这一件事。"""
+    product = products.get(product_id)
+    if product is None:
+        return None
+    product["stock"] += qty
+    return product
+
+
+def remove_inventory(product_id: str, qty: int) -> dict | None:
+    """出库：库存数量减少 qty。和 add_inventory 一样，这一版不做任何校验——
+    库存可以被减成负数，qty 可以传负数，这些"业务上不合理但代码不会报错"
+    的情况，都留给 Phase 3 的 Tool Validation 去处理，不在这里提前解决。"""
+    product = products.get(product_id)
+    if product is None:
+        return None
+    product["stock"] -= qty
+    return product
+
+
 # 符合 OpenAI Function Calling 协议形状的 Tool Schema（DeepSeek 用的就是这一套，
 # 见 Commit 0.1）。description 是直接喂给模型的输入，不是写给人看的代码注释——
 # 模型会不会在正确的时机决定调用这个工具，很大程度上取决于这段文字写得好不好。
@@ -33,6 +55,58 @@ GET_INVENTORY_SCHEMA = {
                 },
             },
             "required": ["product_id"],
+        },
+    },
+}
+
+ADD_INVENTORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "add_inventory",
+        "description": (
+            "Add stock for a product (e.g. after a new shipment arrives). "
+            "Use this when the user asks to add, restock, or increase "
+            "inventory for a specific product."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "string",
+                    "description": "The product ID, e.g. 'A100' or 'B200'.",
+                },
+                "qty": {
+                    "type": "integer",
+                    "description": "How many units to add to stock.",
+                },
+            },
+            "required": ["product_id", "qty"],
+        },
+    },
+}
+
+REMOVE_INVENTORY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "remove_inventory",
+        "description": (
+            "Remove stock for a product (e.g. after a sale or shipment out). "
+            "Use this when the user asks to remove, deduct, or decrease "
+            "inventory for a specific product."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "string",
+                    "description": "The product ID, e.g. 'A100' or 'B200'.",
+                },
+                "qty": {
+                    "type": "integer",
+                    "description": "How many units to remove from stock.",
+                },
+            },
+            "required": ["product_id", "qty"],
         },
     },
 }

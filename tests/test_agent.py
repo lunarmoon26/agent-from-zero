@@ -101,6 +101,11 @@ def test_ask_sums_cost_and_latency_across_both_calls(monkeypatch):
     assert result.tokens_out == 13
 
 
+def test_tool_functions_keys_match_tool_schema_names():
+    schema_names = {schema["function"]["name"] for schema in agent.TOOLS}
+    assert schema_names == set(agent.TOOL_FUNCTIONS.keys())
+
+
 class TestMissingProductPlumbing:
     """
     这几个测试不回答"模型会不会编造数字"——那是模型的行为，不是我们代码的逻辑，

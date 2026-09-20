@@ -2,12 +2,24 @@ import json
 
 from src.agent import llm
 from src.agent.llm import ChatResult
-from src.tools.inventory import GET_INVENTORY_SCHEMA, get_inventory
+from src.tools.inventory import (
+    ADD_INVENTORY_SCHEMA,
+    GET_INVENTORY_SCHEMA,
+    REMOVE_INVENTORY_SCHEMA,
+    add_inventory,
+    get_inventory,
+    remove_inventory,
+)
 
-# 目前只有一个只读工具——Registry 的通用形态（多个工具、按名字分发）留给
-# Commit 2.1，这里先手写最直接的一份映射，够用就不多做。
-TOOLS = [GET_INVENTORY_SCHEMA]
-TOOL_FUNCTIONS = {"get_inventory": get_inventory}
+# 从一个只读工具扩展到三个（一读两写）——ask() 本身一行都不用改，靠
+# tool_call.function.name 去这两个字典/列表里按名字查，加一个新工具只需要
+# 在这两个地方各加一条。
+TOOLS = [GET_INVENTORY_SCHEMA, ADD_INVENTORY_SCHEMA, REMOVE_INVENTORY_SCHEMA]
+TOOL_FUNCTIONS = {
+    "get_inventory": get_inventory,
+    "add_inventory": add_inventory,
+    "remove_inventory": remove_inventory,
+}
 
 
 def _sum_chat_results(first: ChatResult, second: ChatResult) -> ChatResult:
