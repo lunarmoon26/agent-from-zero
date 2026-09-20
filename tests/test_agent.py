@@ -38,6 +38,34 @@ def _client_with_responses(*responses) -> MagicMock:
     return fake_client
 
 
+class TestBusinessContext:
+    def test_agent_system_prompt_contains_the_generic_default_system(self):
+        assert llm.DEFAULT_SYSTEM in agent.AGENT_SYSTEM_PROMPT
+
+    def test_agent_system_prompt_contains_business_context(self):
+        assert "Singapore" in agent.AGENT_SYSTEM_PROMPT
+        assert str(agent.SAFETY_STOCK) in agent.AGENT_SYSTEM_PROMPT
+        assert "7 days" in agent.AGENT_SYSTEM_PROMPT
+
+    def test_ask_defaults_to_the_agent_system_prompt(self, monkeypatch):
+        fake_client = _client_with_responses(_response(content="ok", tool_calls=None))
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        agent.ask("hi")
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["messages"][0] == {"role": "system", "content": agent.AGENT_SYSTEM_PROMPT}
+
+    def test_ask_still_accepts_a_custom_system(self, monkeypatch):
+        fake_client = _client_with_responses(_response(content="ok", tool_calls=None))
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        agent.ask("hi", system="custom system")
+
+        call_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["messages"][0] == {"role": "system", "content": "custom system"}
+
+
 def test_ask_returns_directly_when_model_does_not_call_a_tool(monkeypatch):
     fake_client = _client_with_responses(_response(content="Hi there!", tool_calls=None))
     monkeypatch.setattr(llm, "get_client", lambda: fake_client)

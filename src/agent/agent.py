@@ -23,6 +23,25 @@ TOOL_FUNCTIONS = {
 
 DEFAULT_MAX_STEPS = 10
 
+# Safety Stock 是全局一个数，不是每个商品各自的字段——够用就不提前引入
+# "每个商品单独配置"这种当前不需要的复杂度（A100 库存 20 高于阈值、B200
+# 库存 8 低于阈值，两种情况已经能被测到）。
+SAFETY_STOCK = 10
+
+BUSINESS_CONTEXT = (
+    "Business context for this company:\n"
+    "- Warehouse location: Singapore\n"
+    f"- Safety stock threshold: {SAFETY_STOCK} units, applies to every product. "
+    "If a product's stock is at or below this threshold, treat it as low stock "
+    "and mention that a reorder should be considered.\n"
+    "- Supplier lead time: 7 days.\n"
+)
+
+# 叠加在 llm.DEFAULT_SYSTEM 之上，不是替换掉它——chat()（最基础的单次对话）
+# 不需要认识这家公司的库存政策，它的默认值应该保持通用；只有 ask() 这个
+# Agent 入口才需要业务背景，所以在这里单独拼一份，llm.py 一个字都没改。
+AGENT_SYSTEM_PROMPT = f"{llm.DEFAULT_SYSTEM}\n\n{BUSINESS_CONTEXT}"
+
 
 class LoopError(Exception):
     """Agent Loop 本身的控制流失败——不是模型调用失败（那是 llm.py 的
@@ -83,7 +102,7 @@ def _execute_tool_call(tool_call) -> dict:
     }
 
 
-def ask(user_message: str, system: str = llm.DEFAULT_SYSTEM, max_steps: int = DEFAULT_MAX_STEPS) -> ChatResult:
+def ask(user_message: str, system: str = AGENT_SYSTEM_PROMPT, max_steps: int = DEFAULT_MAX_STEPS) -> ChatResult:
     """
     真正的 Agent Loop：持续循环，直到模型这一轮不再要求调用任何工具为止。
 
@@ -100,6 +119,11 @@ def ask(user_message: str, system: str = llm.DEFAULT_SYSTEM, max_steps: int = DE
     看起来像正常回答、实际是"未完成"的字符串——字符串结果和真正的最终答案
     长得一样，调用方很容易忘记检查"这是不是真的答案"；异常会强制调用方
     要么处理、要么让它继续往上冒，不会被悄悄当成正常结果使用。
+
+    `system` 默认是 `AGENT_SYSTEM_PROMPT`（Commit 6.1 新增）：在通用的
+    `llm.DEFAULT_SYSTEM` 之后叠加一段业务背景（仓库位置、安全库存阈值、
+    供应商交货周期），让模型不只报数字，还能做"这算不算低库存"这类业务
+    判断。传自定义 `system` 依然会完全覆盖这个默认值，不会被这次改动锁死。
     """
     messages = [
         {"role": "system", "content": system},
