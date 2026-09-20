@@ -1,3 +1,4 @@
+import copy
 import json
 from unittest.mock import MagicMock
 
@@ -104,6 +105,82 @@ def test_ask_sums_cost_and_latency_across_both_calls(monkeypatch):
 def test_tool_functions_keys_match_tool_schema_names():
     schema_names = {schema["function"]["name"] for schema in agent.TOOLS}
     assert schema_names == set(agent.TOOL_FUNCTIONS.keys())
+
+
+def test_every_request_includes_the_tool_schema(monkeypatch):
+    # 和上一版不一样：这一版每一轮都要带 tools，因为循环可能不止两轮，
+    # 模型需要在每一轮都知道自己还能调用什么。
+    tool_call = _tool_call("call_1", "get_inventory", {"product_id": "A100"})
+    first_response = _response(content=None, tool_calls=[tool_call])
+    second_response = _response(content="ok", tool_calls=None)
+    fake_client = _client_with_responses(first_response, second_response)
+    monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+    agent.ask("A100 还有多少库存？")
+
+    for call in fake_client.chat.completions.create.call_args_list:
+        assert call.kwargs["tools"] == agent.TOOLS
+
+
+def test_two_sequential_tool_calls_across_three_requests(monkeypatch):
+    # "A100 库存够不够给 B200 客户凑单" 这类问题：先查 A100，再查 B200，
+    # 两轮都是模型自己决定要不要继续调用，第三轮才给出最终总结。
+    first = _response(content=None, tool_calls=[_tool_call("call_1", "get_inventory", {"product_id": "A100"})])
+    second = _response(content=None, tool_calls=[_tool_call("call_2", "get_inventory", {"product_id": "B200"})])
+    third = _response(content="A100 库存 20，B200 库存 8，足够凑单。", tool_calls=None)
+    responses = [first, second, third]
+
+    # 不能直接用 side_effect=[...] 之后再看 call_args_list 里的 messages——
+    # messages 是循环里同一个列表对象，会被原地不断 append，call_args_list
+    # 存的是这个对象的引用，不是调用当时的快照。事后翻看历史调用参数，看到
+    # 的永远是这个列表"最终"的样子，不是"当时"的样子。这里用一个包装函数，
+    # 在每次调用真正发生的那一刻就把 messages 深拷贝下来，才能拿到真实的
+    # 历史快照。
+    message_snapshots = []
+
+    def fake_create(**kwargs):
+        message_snapshots.append(copy.deepcopy(kwargs["messages"]))
+        return responses.pop(0)
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = fake_create
+    monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+    result = agent.ask("A100 库存够不够给 B200 客户凑单？")
+
+    assert result.text == "A100 库存 20，B200 库存 8，足够凑单。"
+    assert fake_client.chat.completions.create.call_count == 3
+
+    # 第二轮请求发出那一刻，应该已经包含第一轮的 tool 调用记录和结果
+    tool_messages = [m for m in message_snapshots[1] if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert json.loads(tool_messages[0]["content"])["name"] == "Industrial Sensor A100"
+
+    # 第三轮请求发出那一刻，两次工具结果应该都在
+    tool_messages = [m for m in message_snapshots[2] if isinstance(m, dict) and m.get("role") == "tool"]
+    assert len(tool_messages) == 2
+
+
+def test_multiple_tool_calls_in_a_single_response_are_all_executed(monkeypatch):
+    # 模型在同一轮里一次性请求两个工具调用（不是分两轮），验证 for 循环
+    # 逐个执行、逐条把结果加回去，而不是只处理第一个就丢掉其余的。
+    first_response = _response(
+        content=None,
+        tool_calls=[
+            _tool_call("call_a", "get_inventory", {"product_id": "A100"}),
+            _tool_call("call_b", "get_inventory", {"product_id": "B200"}),
+        ],
+    )
+    second_response = _response(content="两个都查到了。", tool_calls=None)
+    fake_client = _client_with_responses(first_response, second_response)
+    monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+    result = agent.ask("A100 和 B200 分别还有多少库存？")
+
+    assert result.text == "两个都查到了。"
+    second_call_messages = fake_client.chat.completions.create.call_args_list[1].kwargs["messages"]
+    tool_messages = [m for m in second_call_messages if isinstance(m, dict) and m.get("role") == "tool"]
+    assert {m["tool_call_id"] for m in tool_messages} == {"call_a", "call_b"}
 
 
 class TestMissingProductPlumbing:
