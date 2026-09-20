@@ -82,6 +82,45 @@ def _estimate_cost_usd(cache_hit_tokens: int, cache_miss_tokens: int, tokens_out
     )
 
 
+def _complete(messages: list[dict], temperature: float = 0.0, tools: list[dict] | None = None):
+    """真正发请求的那一层，被 chat() 和 Commit 1.2 的 tool-calling 逻辑共用——
+    后者需要拿到原始 response（读 message.tool_calls），不能只要 chat() 那样
+    拍扁成纯文本的 ChatResult。`tools` 不传时完全不带这个字段，行为和 Commit 0.1
+    时一模一样。三种失败分类逻辑只在这一层做一次，两个调用方都不用重复处理。
+    """
+    started_at = time.perf_counter()
+    try:
+        kwargs = dict(model=DEFAULT_MODEL, temperature=temperature, messages=messages)
+        if tools:
+            kwargs["tools"] = tools
+        response = get_client().chat.completions.create(**kwargs)
+    except AuthenticationError as e:
+        raise AuthenticationFailure(str(e)) from e
+    except APIConnectionError as e:
+        raise NetworkFailure(str(e)) from e
+    except BadRequestError as e:
+        raise BadRequestFailure(str(e)) from e
+    latency_ms = (time.perf_counter() - started_at) * 1000
+    return response, latency_ms
+
+
+def _to_chat_result(response, latency_ms: float) -> ChatResult:
+    usage = response.usage
+    cache_hit_tokens = usage.prompt_cache_hit_tokens or 0
+    cache_miss_tokens = usage.prompt_cache_miss_tokens or 0
+    tokens_out = usage.completion_tokens
+
+    return ChatResult(
+        text=response.choices[0].message.content,
+        tokens_in=usage.prompt_tokens,
+        tokens_out=tokens_out,
+        cache_hit_tokens=cache_hit_tokens,
+        cache_miss_tokens=cache_miss_tokens,
+        latency_ms=latency_ms,
+        estimated_cost_usd=_estimate_cost_usd(cache_hit_tokens, cache_miss_tokens, tokens_out),
+    )
+
+
 def chat(user_message: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0) -> ChatResult:
     """
     最基础的一次 Chat Completion，不涉及工具、不涉及历史。DeepSeek 走的是
@@ -99,38 +138,12 @@ def chat(user_message: str, system: str = DEFAULT_SYSTEM, temperature: float = 0
     返回值是 ChatResult，用 time.perf_counter() 量出这次请求真正花了多久，
     从 response.usage 里读出真实的 token 计费明细，再折算成估算成本。
     """
-    started_at = time.perf_counter()
-    try:
-        response = get_client().chat.completions.create(
-            model=DEFAULT_MODEL,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_message},
-            ],
-        )
-    except AuthenticationError as e:
-        raise AuthenticationFailure(str(e)) from e
-    except APIConnectionError as e:
-        raise NetworkFailure(str(e)) from e
-    except BadRequestError as e:
-        raise BadRequestFailure(str(e)) from e
-    latency_ms = (time.perf_counter() - started_at) * 1000
-
-    usage = response.usage
-    cache_hit_tokens = usage.prompt_cache_hit_tokens or 0
-    cache_miss_tokens = usage.prompt_cache_miss_tokens or 0
-    tokens_out = usage.completion_tokens
-
-    return ChatResult(
-        text=response.choices[0].message.content,
-        tokens_in=usage.prompt_tokens,
-        tokens_out=tokens_out,
-        cache_hit_tokens=cache_hit_tokens,
-        cache_miss_tokens=cache_miss_tokens,
-        latency_ms=latency_ms,
-        estimated_cost_usd=_estimate_cost_usd(cache_hit_tokens, cache_miss_tokens, tokens_out),
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_message},
+    ]
+    response, latency_ms = _complete(messages, temperature=temperature)
+    return _to_chat_result(response, latency_ms)
 
 
 if __name__ == "__main__":
