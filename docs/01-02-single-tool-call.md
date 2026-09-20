@@ -102,13 +102,15 @@ def ask(user_message: str, system: str = llm.DEFAULT_SYSTEM) -> ChatResult:
     return _sum_chat_results(first_result, second_result)
 ```
 
-几个设计点：
+几个通过真实调用才搞清楚的协议细节（写代码之前先用一个独立脚本跑过一遍完整链路，不是照着文档猜的）：
 
+- **模型返回的 `tool_calls` 里，`function.arguments` 是一个 JSON 字符串，不是已经解析好的字典**——必须自己 `json.loads()` 才能拿到 `product_id`；`agent.py` 里的 `args = json.loads(tool_call.function.arguments)` 就是在做这件事。
 - **`messages` 里必须先原样放回模型那条"我要调用工具"的 assistant message，再放工具结果**——这不是这个项目自己发明的约定，是 OpenAI 兼容协议本身的要求：`role: "tool"` 的消息靠 `tool_call_id` 和前一条 assistant message 里的 `tool_calls[].id` 对上号，模型才知道"这条结果是回答我刚才哪一次调用请求的"。漏掉 assistant 那条消息，或者 `tool_call_id` 对不上，协议层面就是不合法的请求。
 - **工具执行结果用 `json.dumps()` 序列化成字符串再放进 `content`**——`role: "tool"` 消息的 `content` 只能是字符串，不能直接塞一个 Python `dict`。`get_inventory` 返回的 `{"name": ..., "price": ..., "stock": ...}` 要先序列化。
 - **触发了工具调用的一次问答，实际是两次真实的模型请求**——`text` 只取第二次（那才是给用户看的最终回答），但 `tokens_in`/`tokens_out`/`latency_ms`/`estimated_cost_usd` 必须把两次请求的数字加起来（`_sum_chat_results`），否则 Phase 14 的 Dashboard 会看到一个比实际发生的便宜一半、快一半的假数字。
 - **这一步只处理 `message.tool_calls[0]`，不处理模型一次返回多个 tool_calls 的情况**——目前只有一个工具可选，模型没有理由在一条消息里请求调用两次 `get_inventory`；等 Commit 2.1 加入多个工具、Commit 2.2 写出真正的 Agent Loop，才需要认真处理"一次响应里带多个 tool_calls"和"工具调用触发新一轮工具调用"这些情况。
 - **没有做成通用的 Tool Registry（`name -> function` 之外更复杂的东西）**——`TOOL_FUNCTIONS` 就是一个最直接的字典，够这一步用。Commit 2.1 加入第二、第三个工具时，如果这个字典还够用，就不动它；如果分发逻辑变复杂了，到那时候再重构，不提前设计。
+- **第二次请求不需要再带 `tools` 参数**——`llm._complete(messages)` 这次没有传 `tools`，因为这次只是要模型把工具结果总结成人话，不需要它再决定要不要调用别的工具（Phase 2 的多工具循环里，这个假设会被重新审视）。
 - **回填 `messages` 时手动重建了一个精简的 assistant dict，没有把 `response.choices[0].message` 这个 SDK 对象原样塞回去**——`openai` SDK 其实允许直接塞对象（下一次请求前会自己序列化），但那样一来，这一次问答的完整历史里就会混进一个不是纯 JSON、绑定着 `openai` 这个具体 SDK 版本的对象。手动重建成 `{"role": ..., "content": ..., "tool_calls": [...]}` 这样的纯字典，多写了几行代码，换来的是 `messages` 列表在任何时候都可以直接 `json.dumps()`——Commit 8.x 要把完整对话历史存成 Trace，Commit 13.x 要把它落盘做 Checkpoint，都要求这份历史是普通数据，不能夹带一个具体 SDK 版本才认识的对象。
 
 ### 2.0 谁真正"调用"了这个工具
@@ -233,6 +235,7 @@ result = ask("A100 还有多少库存？")
 2. **`tool_call_id` 是两次请求之间唯一的关联线索**——第二次请求里的 assistant 消息和 tool 消息，靠同一个 `call_00_luvHOu8Y1L4ze41twVA08026` 才能被模型认出"这条工具结果是在回答哪一次调用请求"。如果 `ask()` 在拼第二条消息时把这个 id 写错，协议层面这次请求就是不合法的。
 3. **`role: "tool"` 消息的 `content` 是 `get_inventory("A100")` 真实返回值序列化后的字符串**——`{"name": "Industrial Sensor A100", "price": 100, "stock": 20}`，和 `products` 字典里的原始数据逐字段对得上，不是模型自己编出来再让程序确认的结果。
 4. **第一次调用命中的模型是 `deepseek-flash`，`prompt_cache_hit_tokens=128`**——请求发的是 `deepseek-chat`，服务端解析后实际路由到 `deepseek-flash`（延续 Commit 0.3 的观察），这次 335 个输入 token 里有 128 个命中了缓存，说明 `system` 加 `tools` 这段固定内容已经具备被复用的条件，具体命中窗口和粒度仍然是 `TODO.md` 里待深入的问题。
+5. **模型内部到底是怎么"决定"输出这个格式的，对外完全不可见**——服务端怎么把 `tools` 转换成模型能理解的输入、模型的原始输出到底长什么样，是 DeepSeek 服务端内部的实现细节；我们只能观察"发进去的 JSON"和"收到的 JSON"这两端。这也是为什么第 2.0 节要强调"决定"和"执行"是协议层面的边界，而不是我们能打开来看的实现细节。
 
 ## 3. Break It / Observe
 
@@ -296,6 +299,7 @@ tests/test_agent.py::test_ask_sums_cost_and_latency_across_both_calls PASSED
 1. 把 `GET_INVENTORY_SCHEMA` 的 `description` 临时改回 Commit 1.1 练习题 1 里那个含糊版本（`"Get inventory."`），重新跑一次第 3 节的两个问题，观察第二个问题（"What is 2+2?"）会不会也触发一次不必要的工具调用——直接感受"描述质量"这次不只是影响模型怎么"说"，还影响它怎么"做决定"。
 2. 故意构造一个 `product_id` 传参错误的场景（比如在 `system` 里加一句误导性指令，让模型倾向于把商品名"Industrial Sensor A100"整个填进 `product_id`），观察 `get_inventory` 会不会因为查不到而返回 `None`，模型最终会怎么回应这个 `None`——这是在为 Commit 1.3 的 Hallucination 实验预热，这里先只观察，不用急着修。
 3. 想一想：如果这一步不是"最多一次工具调用"，而是模型在拿到第一次 `get_inventory` 结果后，又想再查一次别的商品（比如"A100 和 B200 都查一下"），现在的 `ask()` 会发生什么？（提示：`message.tool_calls[0]` 之外的调用请求会被直接忽略，第二次 `_complete(messages)` 也没有再传 `tools`，模型这次物理上不可能再发起新的工具调用）——这个限制正是 Commit 2.2 要解决的问题。
+4. 用 2.1 节的抓包方法，对比"第一次请求"和"第二次请求（不带 `tools`）"两次的 `prompt_cache_hit_tokens`，看第二次因为 `messages` 变长了（多了 assistant 的 tool_calls 消息和 tool 结果两条），缓存命中的 token 数是增加还是减少，把结果也记进 `TODO.md`。
 
 ## 8. What We Learned
 
