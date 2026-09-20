@@ -2,6 +2,10 @@
 
 > Commit: `feat: implement minimal agent loop`
 > Tag: `v0.2.2-agent-loop`
+>
+> 补充实验（异构工具并行调用，见第 3 节末尾）追加在 `test: verify heterogeneous
+> parallel tool calls in a single response` 这次 commit 里，对应 Tag
+> `v0.2.2.1-heterogeneous-tool-calls`。
 
 ## 1. Problem
 
@@ -207,6 +211,192 @@ tokens_in=1362 tokens_out=222 latency_ms=2139 cost_usd=0.000206
 模型这次没有直接下结论"库存够不够"，而是反问用户需要多少数量——这是一个合理但和最初预想略有出入的回答（最初设计这个问题是想看它直接判断"够"或"不够"）。**这也值得如实记录**：问题本身没有说明客户具体要多少件，模型选择先澄清而不是瞎猜一个够不够的结论，是一次诚实的边界处理，不是这一步要修的问题。
 
 **这次抓包全程只用了 2 次请求，不是 3 次**——因为两个商品的查询被模型合并成了第 1 轮里的两个并行 `tool_calls`，而不是分成"查 A100 → 查 B200 → 总结"三轮。这和最初预想的"连续两次调用"略有出入，值得记录：**模型选择并行还是串行发起多个工具调用，是它自己的决定，不是我们代码能控制的**——`ask()` 的 `for tool_call in message.tool_calls` 之所以要用循环而不是假设只有一个，就是为了同时接得住这两种情况。
+
+### 追加实验：一次响应里能不能出现两个不同的工具
+
+上面验证的是"同一个工具、两次不同参数"（两次都是 `get_inventory`，一次 A100 一次 B200）。还有一个更进一步的问题没验证过：**一次响应里，会不会同时出现两个不同的工具**（比如一个 `get_inventory` 和一个 `add_inventory`）？协议层面 `tool_calls` 是一个数组，理论上没有"必须是同一个函数"这种限制，但"协议允许"不等于"模型真的会这么做"，只能真的问一次才算数。
+
+问一句同时需要"查询"和"写入"两种不同操作的话：
+
+```python
+result = ask("帮我查一下 A100 现在的库存，另外刚到货 5 个 B200，帮我入库一下。")
+```
+
+真实抓到的第 1 次请求（`deepseek-chat`，2026-09-20，完整原始 body）：
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant for a small industrial equipment company.\n\nBusiness context for this company:\n- Warehouse location: Singapore\n- Safety stock threshold: 10 units, applies to every product. If a product's stock is at or below this threshold, treat it as low stock and mention that a reorder should be considered.\n- Supplier lead time: 7 days.\n"
+    },
+    {
+      "role": "user",
+      "content": "帮我查一下 A100 现在的库存，另外刚到货 5 个 B200，帮我入库一下。"
+    }
+  ],
+  "model": "deepseek-chat",
+  "temperature": 0.0,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_inventory",
+        "description": "Look up the current stock level and unit price for a product, given its product ID. Use this whenever the user asks about stock, availability, or price for a specific product.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "product_id": {"type": "string", "description": "The product ID, e.g. 'A100' or 'B200'."}
+          },
+          "required": ["product_id"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "add_inventory",
+        "description": "Add stock for a product (e.g. after a new shipment arrives). Use this when the user asks to add, restock, or increase inventory for a specific product.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "product_id": {"type": "string", "description": "The product ID, e.g. 'A100' or 'B200'."},
+            "qty": {"type": "integer", "description": "How many units to add to stock."}
+          },
+          "required": ["product_id", "qty"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "remove_inventory",
+        "description": "Remove stock for a product (e.g. after a sale or shipment out). Use this when the user asks to remove, deduct, or decrease inventory for a specific product.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "product_id": {"type": "string", "description": "The product ID, e.g. 'A100' or 'B200'."},
+            "qty": {"type": "integer", "description": "How many units to remove from stock."}
+          },
+          "required": ["product_id", "qty"]
+        }
+      }
+    }
+  ]
+}
+```
+
+真实抓到的第 1 次响应（完整原始 body，`usage` 一字未删）：
+
+```json
+{
+  "id": "6eed10ff-23e1-45bf-a545-e11452cf2cdd",
+  "object": "chat.completion",
+  "created": 1789887949,
+  "model": "deepseek-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I'll look up A100's stock and add the 5 B200 units.",
+        "tool_calls": [
+          {
+            "index": 0,
+            "id": "call_00_8MOOniNtNA8J8zJ5k7B91813",
+            "type": "function",
+            "function": {"name": "get_inventory", "arguments": "{\"product_id\": \"A100\"}"}
+          },
+          {
+            "index": 1,
+            "id": "call_01_yWTNfmgR222QUtywfKsb4766",
+            "type": "function",
+            "function": {"name": "add_inventory", "arguments": "{\"product_id\": \"B200\", \"qty\": 5}"}
+          }
+        ]
+      },
+      "logprobs": null,
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 665,
+    "completion_tokens": 104,
+    "total_tokens": 769,
+    "prompt_tokens_details": {"cached_tokens": 512},
+    "prompt_cache_hit_tokens": 512,
+    "prompt_cache_miss_tokens": 153
+  },
+  "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+}
+```
+
+**答案是肯定的：`tool_calls` 数组里 `index: 0` 是 `get_inventory`，`index: 1` 是 `add_inventory`——两个完全不同的工具，在同一次响应里一起被请求。** 这不是"同一个工具重复调用两次"的特例，是协议真正意义上的异构并行调用：模型自己判断出这句话包含两个独立的动作（查询 A100、给 B200 入库），把它们打包进同一轮的 `tool_calls` 数组，而不是分两轮各处理一件事。
+
+第 2 次请求把两个真实工具结果都带了回去（完整原始 body）：
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant for a small industrial equipment company.\n\nBusiness context for this company:\n- Warehouse location: Singapore\n- Safety stock threshold: 10 units, applies to every product. If a product's stock is at or below this threshold, treat it as low stock and mention that a reorder should be considered.\n- Supplier lead time: 7 days.\n"},
+    {"role": "user", "content": "帮我查一下 A100 现在的库存，另外刚到货 5 个 B200，帮我入库一下。"},
+    {
+      "role": "assistant",
+      "content": "I'll look up A100's stock and add the 5 B200 units.",
+      "tool_calls": [
+        {"id": "call_00_8MOOniNtNA8J8zJ5k7B91813", "type": "function", "function": {"name": "get_inventory", "arguments": "{\"product_id\": \"A100\"}"}},
+        {"id": "call_01_yWTNfmgR222QUtywfKsb4766", "type": "function", "function": {"name": "add_inventory", "arguments": "{\"product_id\": \"B200\", \"qty\": 5}"}}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "call_00_8MOOniNtNA8J8zJ5k7B91813", "content": "{\"name\": \"Industrial Sensor A100\", \"price\": 100, \"stock\": 20}"},
+    {"role": "tool", "tool_call_id": "call_01_yWTNfmgR222QUtywfKsb4766", "content": "{\"name\": \"Industrial Sensor B200\", \"price\": 180, \"stock\": 13}"}
+  ],
+  "model": "deepseek-chat",
+  "temperature": 0.0,
+  "tools": [ /* 完整的三个 Schema，和第 1 次请求一字不差 */ ]
+}
+```
+
+对应的第 2 次响应（完整原始 body）：
+
+```json
+{
+  "id": "f57fbfb7-db68-47fe-8df7-bcb5439f8d09",
+  "object": "chat.completion",
+  "created": 1789887950,
+  "model": "deepseek-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "两件事都办好了：\n\n**A100 库存查询**\n- 产品：Industrial Sensor A100\n- 当前库存：**20 个**\n- 单价：$100\n- 库存状态：20 > 10（安全库存阈值），库存充足，暂不需要补货。\n\n**B200 入库**\n- 已成功入库 5 个\n- 入库后库存：**13 个**（原为 8 个）\n- 单价：$180\n- 库存状态：13 > 10，高于安全库存阈值，暂时无需再补货。\n\n补充提醒：供应商交货周期为 7 天，如果后续 A100 或 B200 的库存降到 10 个或以下，建议提前下单补货，以免断货。还需要我查其他产品吗？"
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 829,
+    "completion_tokens": 172,
+    "total_tokens": 1001,
+    "prompt_tokens_details": {"cached_tokens": 640},
+    "prompt_cache_hit_tokens": 640,
+    "prompt_cache_miss_tokens": 189
+  },
+  "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"
+}
+```
+
+直接检查内存里的 `products` 字典，确认 `add_inventory` 是真的执行了，不是模型编出来的数字：
+
+```text
+调用前：{'name': 'Industrial Sensor B200', 'price': 180, 'stock': 8}
+调用后：{'name': 'Industrial Sensor B200', 'price': 180, 'stock': 13}
+```
+
+`8 + 5 = 13`，和响应里"入库后库存：13 个（原为 8 个）"完全对得上。这次全程也只用了 2 次请求：一个 `get_inventory` 加一个 `add_inventory` 被打包进了同一轮，`ask()` 的 `for tool_call in message.tool_calls: ...` 循环把两个不同的函数都正确分发、执行、把结果各自对应的 `tool_call_id` 带回去了——`test_multiple_different_tools_in_a_single_response_are_all_executed` 这个 mock 测试用同样的结构把这个行为钉成了回归测试。
 
 ## 4. Implement the Fix
 

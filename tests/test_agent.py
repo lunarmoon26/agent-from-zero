@@ -5,6 +5,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.agent import agent, llm
+from src.tools.inventory import products
+
+
+@pytest.fixture(autouse=True)
+def _restore_products():
+    """这个文件里大部分测试只读库存，但下面新增的异构工具调用测试会真的
+    执行 add_inventory——不还原的话，会污染同一个 pytest 进程里其他测试
+    看到的库存数字（同样的问题、同样的解法见 tests/test_inventory.py）。"""
+    snapshot = copy.deepcopy(products)
+    yield
+    products.clear()
+    products.update(snapshot)
 
 
 def _tool_call(call_id: str, name: str, arguments: dict) -> MagicMock:
@@ -211,6 +223,39 @@ def test_multiple_tool_calls_in_a_single_response_are_all_executed(monkeypatch):
     second_call_messages = fake_client.chat.completions.create.call_args_list[1].kwargs["messages"]
     tool_messages = [m for m in second_call_messages if isinstance(m, dict) and m.get("role") == "tool"]
     assert {m["tool_call_id"] for m in tool_messages} == {"call_a", "call_b"}
+
+
+def test_multiple_different_tools_in_a_single_response_are_all_executed(monkeypatch):
+    # 不只是同一个工具被调用两次（上面那条测试）——模型也可能在同一轮里
+    # 同时请求两个完全不同的工具（一读一写）。验证 TOOL_FUNCTIONS 按名字
+    # 分发时，两个不同的函数都被真的调用了，不是只有第一个生效、第二个
+    # 被静默丢弃。真实抓包证据见 docs/02-02-agent-loop.md 的补充实验。
+    first_response = _response(
+        content=None,
+        tool_calls=[
+            _tool_call("call_get", "get_inventory", {"product_id": "A100"}),
+            _tool_call("call_add", "add_inventory", {"product_id": "B200", "qty": 5}),
+        ],
+    )
+    second_response = _response(content="都处理好了。", tool_calls=None)
+    fake_client = _client_with_responses(first_response, second_response)
+    monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+    before_stock = products["B200"]["stock"]
+
+    result = agent.ask("查一下 A100 库存，另外 B200 入库 5 个。")
+
+    assert result.text == "都处理好了。"
+    second_call_messages = fake_client.chat.completions.create.call_args_list[1].kwargs["messages"]
+    tool_messages = {
+        m["tool_call_id"]: json.loads(m["content"])
+        for m in second_call_messages
+        if isinstance(m, dict) and m.get("role") == "tool"
+    }
+    assert tool_messages["call_get"]["name"] == "Industrial Sensor A100"
+    assert tool_messages["call_add"]["stock"] == before_stock + 5
+    # add_inventory 是真的被执行了，不是只回显了参数——products 字典本身也变了。
+    assert products["B200"]["stock"] == before_stock + 5
 
 
 class TestMissingProductPlumbing:
