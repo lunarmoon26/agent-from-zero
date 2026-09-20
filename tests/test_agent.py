@@ -99,3 +99,38 @@ def test_ask_sums_cost_and_latency_across_both_calls(monkeypatch):
 
     assert result.tokens_in == 30
     assert result.tokens_out == 13
+
+
+class TestMissingProductPlumbing:
+    """
+    这几个测试不回答"模型会不会编造数字"——那是模型的行为，不是我们代码的逻辑，
+    只能靠真实调用观察（见 docs/01-03-hallucination-guard.md 的 Break It 实验）。
+    这里只验证 get_inventory 返回 None 时，ask() 的管道本身接得住，不会因为
+    None 这个值而崩溃或传错东西。
+    """
+
+    def test_none_result_is_serialized_as_json_null_in_the_tool_message(self, monkeypatch):
+        tool_call = _tool_call("call_1", "get_inventory", {"product_id": "Z999"})
+        first_response = _response(content=None, tool_calls=[tool_call])
+        second_response = _response(content="I couldn't find any records for Z999.", tool_calls=None)
+        fake_client = _client_with_responses(first_response, second_response)
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        result = agent.ask("Z999 还有多少库存？")
+
+        assert result.text == "I couldn't find any records for Z999."
+        second_call_kwargs = fake_client.chat.completions.create.call_args_list[1].kwargs
+        messages = second_call_kwargs["messages"]
+        tool_message = next(m for m in messages if m["role"] == "tool")
+        assert tool_message["content"] == "null"  # json.dumps(None)，不是空字符串、不是 "None"
+
+    def test_get_inventory_none_result_does_not_crash_the_round_trip(self, monkeypatch):
+        tool_call = _tool_call("call_1", "get_inventory", {"product_id": "Z999"})
+        first_response = _response(content=None, tool_calls=[tool_call])
+        second_response = _response(content="ok", tool_calls=None)
+        fake_client = _client_with_responses(first_response, second_response)
+        monkeypatch.setattr(llm, "get_client", lambda: fake_client)
+
+        # 不应该抛任何异常——None 是 get_inventory 的正常返回值之一（Commit 1.1
+        # 就是这么设计的），不是需要特殊 catch 的错误。
+        agent.ask("Z999 还有多少库存？")
