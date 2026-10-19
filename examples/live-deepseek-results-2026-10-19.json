@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-19",
+  "provider_surface": "DeepSeek API via OpenAI SDK, no tools",
+  "model_requested": "deepseek-chat",
+  "model_returned": "deepseek-flash",
+  "max_worker_calls": 3,
+  "max_output_tokens_per_call": 128,
+  "sdk_max_retries": 0,
+  "configured_request_timeout_seconds": 30,
+  "snapshot": {"A100": 12, "B200": 5},
+  "normal": {
+    "status": "complete",
+    "attempts": [{"number": 1, "artifact": {"A100": 12, "B200": 5}, "accepted": true}]
+  },
+  "recovery": {
+    "fault": "Host removed B200 from the first artifact after the model returned both correct counts",
+    "status": "complete",
+    "attempts": [
+      {"number": 1, "artifact_delivered_to_verifier": {"A100": 12}, "accepted": false, "feedback": "Required SKUs: A100, B200."},
+      {"number": 2, "artifact_delivered_to_verifier": {"A100": 12, "B200": 5}, "accepted": true}
+    ]
+  },
+  "calls": [
+    {"model_returned": "deepseek-flash", "artifact": {"A100": 12, "B200": 5}, "finish_reason": "stop", "input_tokens": 84, "output_tokens": 14, "cache_hit_input_tokens": 0, "cache_miss_input_tokens": 84, "elapsed_ms": 772.81},
+    {"model_returned": "deepseek-flash", "artifact": {"A100": 12, "B200": 5}, "finish_reason": "stop", "input_tokens": 84, "output_tokens": 14, "cache_hit_input_tokens": 0, "cache_miss_input_tokens": 84, "elapsed_ms": 460.97},
+    {"model_returned": "deepseek-flash", "artifact": {"A100": 12, "B200": 5}, "finish_reason": "stop", "input_tokens": 87, "output_tokens": 14, "cache_hit_input_tokens": 0, "cache_miss_input_tokens": 87, "elapsed_ms": 763.64}
+  ],
+  "total_input_tokens": 255,
+  "total_output_tokens": 42,
+  "cost_note": "Token usage only; no current-price estimate or invoice verified.",
+  "limitations": [
+    "One baseline and one controlled recovery scenario, not a model-quality benchmark",
+    "Every raw model response was correct; the omission was injected by the host",
+    "Second-turn acceptance does not establish that feedback caused an improvement",
+    "Text-only worker; no live tool execution, write effects, persistence, or restart tested",
+    "The bounded adapter calls the API directly; the upstream chat wrapper is not separately validated by this run"
+  ]
+}
