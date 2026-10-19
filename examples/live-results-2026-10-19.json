@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-19",
+  "surface": "Claude Code CLI with existing authenticated session; no credentials extracted",
+  "model": "claude-opus-5",
+  "cli_version": "2.1.300 (Claude Code)",
+  "tools_enabled": false,
+  "max_worker_calls": 3,
+  "configured_per_call_budget_usd": 0.15,
+  "snapshot": {"A100": 12, "B200": 5},
+  "normal": {
+    "status": "complete",
+    "attempts": [
+      {"number": 1, "artifact": {"A100": 12, "B200": 5}, "accepted": true}
+    ]
+  },
+  "recovery": {
+    "fault": "Host removed B200 from the first artifact after the model returned both correct counts",
+    "status": "complete",
+    "attempts": [
+      {"number": 1, "artifact_delivered_to_verifier": {"A100": 12}, "accepted": false, "feedback": "Required SKUs: A100, B200."},
+      {"number": 2, "artifact_delivered_to_verifier": {"A100": 12, "B200": 5}, "accepted": true}
+    ]
+  },
+  "calls": [
+    {"artifact": {"A100": 12, "B200": 5}, "input_tokens": 2, "cache_creation_input_tokens": 519, "cache_read_input_tokens": 0, "output_tokens": 17, "reported_cost_usd": 0.00367875, "reported_duration_ms": 27057},
+    {"artifact": {"A100": 12, "B200": 5}, "input_tokens": 2, "cache_creation_input_tokens": 520, "cache_read_input_tokens": 0, "output_tokens": 17, "reported_cost_usd": 0.003685, "reported_duration_ms": 1584},
+    {"artifact": {"A100": 12, "B200": 5}, "input_tokens": 2, "cache_creation_input_tokens": 521, "cache_read_input_tokens": 0, "output_tokens": 17, "reported_cost_usd": 0.00369125, "reported_duration_ms": 1799}
+  ],
+  "total_reported_cost_usd": 0.011055,
+  "cost_basis": "CLI-reported list-price equivalent, not a verified charge or subscription invoice",
+  "limitations": [
+    "One baseline and one controlled recovery scenario, not a model-quality benchmark",
+    "Every raw model response was correct; the omission was injected by the host",
+    "Second-turn acceptance does not establish that feedback caused an improvement",
+    "Text-only worker; no live tool execution, write effects, persistence, or restart tested",
+    "A subsequent DeepSeek run is recorded separately in live-deepseek-results-2026-10-19.json"
+  ]
+}
